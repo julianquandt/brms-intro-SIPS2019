@@ -42,7 +42,41 @@ d$gng_cond_n <- ifelse(d$gng_cond == "go", 1, -1)
 
 The data showcase a partially crossed random design in which all participants experience both conditions of the manipulation and all items are assigned to both conditions of the manipulation.
 
-# Fitting
+# `lme4` Recap
+
+
+Our aim is to follow a __maximal model approach__ here (Barr, Levy, Scheepers, & Tily, 2013).
+This means that we will try to estimate a _random intercept_ for each grouping level, as well as _random slopes_ for each fixed effect that we have in the model.
+Moreover, we want to model the _random correlation_ between random slopes and random intercept for each grouping level.
+
+
+Let us build up the model first, though normally we would usually start with the maximal model immediately:
+
+The observations that we have in this example are nested within participants.
+This means, each participant contributes multiple observations for each condition.
+The mixed-model that is consistent with this idea looks like this:
+
+```{r lmer_pp_only}
+
+lme_subject <- lmer(diff ~ gng_cond_n 
+             + (1 + gng_cond_n | subjectID)
+             , data = d)
+
+```
+ 
+In this model the `diff ~ gng_cond_n` part estimates a population-level effect for the difference-score of pre-post measure for each group seperately.
+By adding the `+(1 + gng_cond_n | subjectID)` we estimate the random effects.
+The `(1 | subjectID)` estimates the deviation of each participant from the intercept. 
+The `(gng_cond_n| subjectID)` estimates an adjustment on the fixed effects for each participant.
+To visualize what this means we can create a _caterpillar plot_ like the one below:
+
+```{r label, options}
+dotplot(ranef(lme_subject, cond.var = TRUE))
+```
+
+However, we also have a situation in which each food-picture is randomly divided into multiple conditions across participant (e.g. picture 1 could be in the go-condition for participant 1 but in the no-go condition for participant 2). 
+Thus, each observation for the fixed effect is __cross classified__ between participants and food-pictures.
+Thus we add a second term to the random part of the model acknowleding this end end up with the full model below.
 
 We can fit the maximal model in `lme4` like this:
 
@@ -52,6 +86,24 @@ lme1 <- lmer(diff ~ gng_cond_n
              + (1 + gng_cond_n | FoodItem)
              , data = d)
 ```
+
+Again, we can visualize the random effects.
+
+```{r re_fullmodel}
+dotplot(ranef(lme1, cond.var = TRUE))
+```
+
+We can expect the output of this model with `summary(lme1)`:
+
+```{r summary_lme1}
+summary(lme1)
+```
+
+Note that we have a singular fit here, indicating that the model might not be able to estimate one of the parameters correctly as it might be very close to one of the limiting conditions (e.g. a variance very close to 0).
+Luckily, this will not bother us anymore in `brms`.
+
+
+# `brms`
 
 
 Oversimplified, the only thing that we need to do is to exchange the `lmer` for `brm` (which stands for `b`ayesian `r`egression `m`odel).
