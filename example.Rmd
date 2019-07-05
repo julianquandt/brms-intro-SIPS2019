@@ -1,0 +1,448 @@
+---
+title: "brms example"
+author: "Johannes Algermissen, Julian Quandt"
+date: "June 5, 2019"
+output: html_document
+highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, cache = T, results = "markup", warning = F, message = F)
+
+library(flextable)
+library(officer)
+library(lme4)
+library(lattice)
+library(brms)
+library(ggplot2)
+library(rethinking) # available via devtools::install_github("rmcelreath/rethinking")
+
+make_table <- function(df, ali = "left", aw = 0.5){
+  t <- regulartable(data = df)
+  t <- fontsize(t, size = 18, part = "all")
+  t <- font(t, fontname = "Arial", part = "all")
+  t <- autofit(t, add_w = aw)
+  t <- align(t, align = ali, part = "all")
+  t <- theme_zebra(t)
+  t <- border(t, border = fp_border(), part = "all") 
+  return(t)
+}
+
+```
+
+```{r load_data}
+d <- read.csv("https://osf.io/aetq3/download")
+d <- droplevels(subset(d, gng_cond != "baseline"))
+make_table(head(data.frame(with(d, table(gng_cond, subjectID)))))
+make_table(head(data.frame(with(d, table(gng_cond, FoodItem)))))
+
+contrasts(d$gng_cond) <- contr.sum(2)
+d$gng_cond_n <- ifelse(d$gng_cond == "go", 1, -1)
+```
+
+The data showcase a partially crossed random design in which all participants experience both conditions of the manipulation and all items are assigned to both conditions of the manipulation.
+
+# Fitting
+
+We can fit the maximal model in `lme4` like this:
+
+```{r lme1}
+lme1 <- lmer(diff ~ gng_cond_n 
+             + (1 + gng_cond_n | subjectID) 
+             + (1 + gng_cond_n | FoodItem)
+             , data = d)
+```
+
+
+Oversimplified, the only thing that we need to do is to exchange the `lmer` for `brm` (which stands for `b`ayesian `r`egression `m`odel).
+
+```{r brm_def}
+brm_def <- brm(diff ~ gng_cond_n 
+             + (1 + gng_cond_n | subjectID) 
+             + (1 + gng_cond_n | FoodItem)
+             , data = d
+             , refresh = 0, silent = T)
+# refresh = 0, silent = T are normally not used but are convenient if knitting the rmd document
+```
+
+However, this only works because there are a lot of hidden default settings that we use in this case. Normally we do not want to leave everything up to the package-developers and want to make the defaults at least explicit and often change them.
+
+The most important defaults that were hidden were:
+
+- the model family
+- the priors
+- the chain-length and number of chains
+
+If we make them explicit, the model looks like this. 
+Note, that in order to run this model, we would have to specify priors in a `prior_list` collection.
+
+```{r brm1_syntax_full, eval = F}
+brm1 <- brm(diff ~ gng_cond_n 
+             + (1 + gng_cond_n | subjectID) 
+             + (1 + gng_cond_n | FoodItem)
+             , data = d
+             , family = gaussian()
+             , prior = prior_list
+             , chains = 4, cores = 4, warmup = 1000, iter = 2000)
+```
+
+## Priors
+
+Using the `get_prior` function we can see what the default priors that brms will use in this case would be.
+
+```{r fit_default_model}
+default_priors <- make_table(get_prior(diff ~ gng_cond_n 
+                                        + (1 + gng_cond_n | subjectID) 
+                                        + (1 + gng_cond_n | FoodItem)
+                                        , data = d))
+default_priors
+
+```
+
+In this case, 4 different priors are specified:
+
+1. a prior for the Intercept and the effect of go/no-go condition
+1. a prior for the random correlations
+1. a prior for the standard deviations aka. random effects
+1. a prior for the residual variance `sigma`
+
+Things to note here: 
+
+You might not expect this, given that these are 'priors' and that they are 'default' but they _do_ depend on the data. 
+The specific intercept prior in this case `student_t(3, -7, 21)` was chosen based on properties of the data at hand. 
+For other data, it will be different!
+
+This might seem odd, someone _has_ to specify a prior that is based on _the specific research question_ and if you do not do it, Paul Bürkner (the brms head-developer) will do it for you!
+
+All priors, except for the correlation use `student-t` distributions.
+These are used as they are very _weak_ to minimize the 'influence' on the results.
+For example, we can have a look of what the default prior expects about the intercept:
+
+```{r plot_default_int_prior}
+set.seed(1234) # make the random sampling reproducible by setting a seed
+
+def_int_sim <- rstudent_t(1e5, 3, -7, 21)
+HDI95_def_int <- unname(quantile(def_int_sim, c(.025, .975)))
+
+
+ggplot() + geom_density(aes(x = def_int_sim)) + xlim(-200, 200) + geom_vline(xintercept = HDI95_def_int[1]) +  geom_vline(xintercept = HDI95_def_int[2])
+```
+
+This plot shows that all this prior 'dares' to say is that the intercept (i.e. mean difference score) will most likely be somewhere between `r round(HDI95_def_int[1])` and `r round(HDI95_def_int[2])`. 
+However even values around `r round(unname(quantile(def_int_sim, 0)))` or  `r round(unname(quantile(def_int_sim, 1)))` are not considered impossible.
+This is not very daring given that the maximum possible difference in this case would between -200 and 200.
+Thus this prior is very very weak and even with basically _no_ expectations of what the difference will be we could do better than this (just by e.g. saying everything outside `[-200, 200]` is impossible.
+
+Specifiying a list of `set_prior` commands, we can change the priors we want, and leave the rest (in this case the correlation) at default by not including it.
+
+
+```{r define_priors}
+
+prior_list <- c(set_prior('normal(0, 50)', class = 'Intercept'),
+                   set_prior('normal(0, 10)', class = 'b'),
+                   set_prior('cauchy(0, 5)', class = 'sd')
+                   )
+```
+
+Lets see how our intercept prior looks now.
+
+```{r plot_custom_intercept_prior}
+cus_int_sim <- rnorm(1e5, 0, 50)
+HDI95_cus_int <- unname(quantile(cus_int_sim, c(.025, .975)))
+
+
+ggplot() + geom_density(aes(x = cus_int_sim)) + xlim(-200, 200) + geom_vline(xintercept = HDI95_cus_int[1]) +  geom_vline(xintercept = HDI95_cus_int[2])
+```
+
+This looks much more reasonable with 95% of the prior density between `r round(HDI95_cus_int[1])` and `r round(HDI95_cus_int[2])` and no values below `r round(min(cus_int_sim))` or above `r round(max(cus_int_sim))`.
+
+## Fitting the model
+
+```{r fit_brm1}
+brm1 <- brm(diff ~ gng_cond_n 
+             + (1 + gng_cond_n | subjectID) 
+             + (1 + gng_cond_n | FoodItem)
+             , data = d
+             , family = gaussian()
+             , prior = prior_list
+             , chains = 4, cores = 4, warmup = 1000, iter = 2000
+            , save_all_pars = TRUE) # we need save_all_pars for bayes-factors
+```
+
+# Diagnostics
+
+Now its time to check whether our model converged. 
+This works differently compared to lme4.
+
+```{r brm1_convergence_check, options}
+plot(brm1, ask = F)
+```
+
+We want to see whether chains look like 'hairy catterpillars'. 
+
+As this is difficult to see here, let's zoom in on the population-level parameters.
+
+
+```{r brm1_plot_b}
+plot(brm1, pars = "^b", ask = F)
+```
+
+This looks good. 
+Chains mix well and distributions on the right look normal.
+
+Next we want to see whether there were any 'divergent transitions', i.e. movements of the MCMC sampler through the probability space that are 'weird' (it's quite technical, detailed information is [here](https://mc-stan.org/docs/2_19/reference-manual/divergent-transitions.html)).
+
+```{r brm1_check_rhat}
+options(width = 200)
+summary(brm1)
+```
+
+Additionally we could have a look at the `pairs()` plot to see whether the samples of the individual paramters look fine (like a round cloud of points)
+
+```{r pairs_brm1}
+pairs(brm1, pars = "^b")
+```
+
+### Non-Convergence
+
+If the model had not converged, we would make some slight changes to the fitting syntax.
+
+1. Increase the chain-length
+2. Increase resolution of the HMC-sampler by setting `adapt_delta` to .99
+
+This would work the following way
+
+```{r remodel_converge, eval = F}
+brm1 <- brm(diff ~ gng_cond_n 
+             + (1 + gng_cond_n | subjectID) 
+             + (1 + gng_cond_n | FoodItem)
+             , data = d
+             , family = gaussian()
+             , prior = prior_list
+             , chains = 4, cores = 4, warmup = 1000, iter = 5000
+            , save_all_pars = TRUE  # we need save_all_pars for bayes-factors
+            , control = list(adapt_delta = .99) )
+```
+
+More detailed information about this issue can be found in the stan-documentation [here](https://mc-stan.org/misc/warnings.html#divergent-transitions-after-warmup)
+
+# Evaluation
+
+## Adequacy
+
+The model seems to have converged well, but is it an adequate representation of the data?
+First we can have a look at whether the posterior samples represent the observed data. This is called a posterior-predictive check.
+
+```{r pp_check_brm1}
+pp_check(brm1)
+pp_check(brm1, type = "stat")
+```
+
+Next we could check for influential observations with help of the `loo` package. 
+`loo` performs approximate leave-one-out cross validation and thereby provides information about the importance of single observations on the model-predictions.
+If observations have high `PSIS-LOO` statistics (> .7), they are influential and should therefore be investigated further.
+Moreover, this results in information-criteria not being reliable as they are performing approximate leave-one-out cross validation, that is heavily influenced by influential values.
+In these cases we could do k-fold cross validation by hand instead.
+
+```{r loo_brm1}
+loo_brm1 <- loo(brm1)
+plot(loo_brm1)
+pp_check(brm1, type = "loo_pit")
+```
+
+## Estimates
+
+To check our estimates we can look at the summary
+
+```{r summary_brm1, options}
+summary(brm1)
+```
+
+Just for comparison, lets see how much influence the prior had in this case by comparing it to the model with the default (very vague) prior.
+
+```{r brm_def_summary}
+summary(brm_def)
+```
+
+And what about lme4?
+
+
+```{r lme_summary}
+summary(lme1)
+```
+
+If we compare the estimates of brms and lme4 they are very similar in this case. 
+One noteworthy thing is the random correlation in the food-item term. 
+Notice how, while in lme4 the estimate reports 1 (which you should read as "cannot be estimated" in this case rather than saying it actually is 1), the brms model will give you a value close to 0. 
+But if you look at the credible interval of that interaction it basically shows that it can be anywhere between -1 and 1.
+Why is this?
+Well lets have a look at the prior of the correlation, this `lkj(1)` thing from the table above.
+
+```{r lkj_prior}
+corr_prior <- data.frame(rlkjcorr(1e6, 2, eta = 1))[[2]]
+ggplot()+geom_density(aes(x = corr_prior))
+```
+
+From this plot, we see that the prior that is used is very vague, basically saying that 
+_any_ correlation is equally likely.
+This is exactly what we get back in the estimates, telling us that the mean is 0 and the 95% CI is between -.95 and .95 approximately.
+This is not a "bug" or a conincidence and is actually a very important point about priors.
+If we have a lot of data, the prior that we specify will not really matter as we saw for the other estimates above where the default priors and our own priors led to basically identical estimates, even though they were in fact quite different.
+
+However, for the random correlation we only have few observations. 
+This is the reason why `lme4` rejects to give us an estimate (or rather gives us the uninterpretable 1), as we do have any prior information that we can use and the data do not give us an interpretable answer, therefore it just cannot be estimated.
+In the Bayesian framework, we already have the prior to work with, saying that it might be anything between -1 and 1, and this is exactly what we get back here.
+
+This is an important point to realize: When we have a lot of data, the prior will not influence the estimates much, but if we do _not_ it can still help our inference by allowing us to include terms in the model that we might not have a lot of information on without simplifying the model. 
+In this case, where we want to keep the correlation in there to regularize our inference on the fixed effects but we might not know beforehand whether it can be estimated we can just keep it in and stop worrying about it as the we will just get the prior back when the data are not giving us any new information.
+This is why most convergence problems in `brms` can simply be solved by increasing chain length or adjusting the step-size of the sampler.
+
+We can also plot the effects in terms of fitted values and predictions.
+
+
+
+```{r plot_fe}
+marginal_effects(brm1)
+marginal_effects(brm1, method = "predict")
+```
+
+Notice that even though there is a clear effect, it is numerically rather small in this case and would not help much in predicting someones score as there is so much noise between observations. 
+ 
+
+# Model/Effect evaluation
+
+With numeric effects or factors with only 2 levels, we can directly use the posterior as a test for whether an effect is present.
+We can calculate a Bayesian p-value (the name is confusing it does _not_ have the same interpretation as a frequentist p-value)
+
+```{r Bayesian-p-value}
+gng_post <- c(posterior_samples(brm1, pars = "b_gng_cond"))[[1]]
+p_val_gng <- mean(gng_post < 0)
+p_val_gng
+```
+
+In this case the p-value would be <.00025 (because it is based on 4000 samples, 1000 per chain; we  have 0 observations that would suggest that the effect is in the opposite direction than we would have expected).
+
+```{r fit_brm0, options}
+prior_list_brm0 <- c(set_prior('normal(0, 50)', class = 'Intercept'),
+                   set_prior('cauchy(0, 5)', class = 'sd')
+                   )
+
+brm0 <- brm(diff ~ 1 
+             + (1  | subjectID) 
+             + (1  | FoodItem)
+             , data = d
+             , family = gaussian()
+             , prior = prior_list_brm0
+             , chains = 4, cores = 4, warmup = 1000, iter = 2000
+             , save_all_pars = TRUE) # we need to save pars for bayes-factor
+
+summary(brm0)
+
+loo_brm0 <- loo(brm0)
+
+loo_compare(loo_brm1, loo_brm0)
+
+brm0 <- add_waic(brm0)
+brm1 <- add_waic(brm1)
+
+compare_ic(brm0, brm1, ic = "waic")
+```
+
+For Bayes-Factors, we need many more iterations in the chains.
+
+
+```{r bayes_factor_custom}
+
+brm0 <- update(brm0, cores = 4, chains = 4, warmup = 5000, iter = 10000, sample_prior = T, save_all_pars = T)
+brm1 <- update(brm1, cores = 4, chains = 4, warmup = 5000, iter = 10000, sample_prior = T, save_all_pars = T)
+# of course, we could increase the iterations directly instead of updating later
+
+bf_10 <- bayes_factor(brm1, brm0)
+```
+
+In this case the Bayes-Factor is `r round(bf_10$bf, 2)` which is really high.
+However, the prior matters a lot for the BF and it is wise to try different ones.
+In this case I will also try the defaults, but normally you would use different _informed_ priors with varying levels of information (i.e. from diffuse to informed).
+
+
+```{r bayes_factor_default}
+brm0_def <- brm(diff ~  1
+             + (1  | subjectID) 
+             + (1 | FoodItem)
+             , warmup = 1000, iter = 10000, chains = 4, cores = 4
+             , data = d
+             , save_all_pars = T
+             , sample_prior = T)
+
+
+brm1_def <- brm(diff ~ gng_cond_n 
+             + (1  + gng_cond_n | subjectID) 
+             + (1 + gng_cond_n | FoodItem)
+             , warmup = 1000, iter = 10000, chains = 4, cores = 4
+             , data = d
+             , save_all_pars = T
+             , sample_prior = T)
+
+bf_10_def <- bayes_factor(brm1_def, brm0_def)
+```
+
+Now the BF is `r round(bf_10_def$bf, 2)` which is even larger.
+
+As can be seen here, the Bayes Factors are really huge in both cases. 
+Notice how `loo-ic` (predictive performance measurement) and Bayes-Factor yield different conclusions about the importance of condition here. 
+This is (sort of) in line with what we observed in the fitted vs. predicted `marginal_effects` plot.
+
+
+# Model families
+
+As said earlier, another advantage of `brms` is that we are not restricted to normal/Gaussian models.
+In fact, in this situation the response distribution does not look entirely normal as it has a very steep peak in the middle and rather long tails compared to a normal distribution.
+Thus, a `student-t` distribution might be a better description of the response-distribution.
+
+```{r brm1_t}
+brm1_t <- brm(diff ~ gng_cond_n 
+             + (1  + gng_cond_n | subjectID) 
+             + (1 + gng_cond_n | FoodItem)
+             , warmup = 1000, iter = 2000, chains = 4, cores = 4
+             , data = d
+             , family = student()
+             , save_all_pars = T
+             , sample_prior = T)
+```
+
+```{r summary_brm1_t}
+summary(brm1_t)
+```
+
+The estimates differ a bit, but not substantially in any case.
+
+```{r pp_check_brm1_t}
+pp_check(brm1_t)
+```
+
+However, we see that the t-distribution captures the real difference scores _much_ better.
+
+```{r pp_check_qq}
+pp_check(brm1_t, type = "loo_pit")
+```
+
+The qq-plot also looks better.
+
+```{r marginal_effects_brm1_t}
+marginal_effects(brm1_t)
+marginal_effects(brm1_t, method = "predict")
+```
+
+These plots also look quite similar.
+
+Lets compare the model with the previous Gaussian model in terms of predictive performance (`loo-ic`)
+
+```{r loo_brm1_t}
+loo_brm1_t <- loo(brm1_t)
+loo_compare(loo_brm1, loo_brm1_t)
+```
+
+This is a 'significant' increase: Around 5 times the SE.
+
+It is really worth trying these different model-families, they can sometimes make a big difference.
+
