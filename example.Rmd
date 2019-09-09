@@ -380,8 +380,8 @@ prior_list_brm0 <- c(set_prior('normal(0, 50)', class = 'Intercept'),
                    )
 
 brm0 <- brm(diff ~ 1 
-             + (1  | subjectID) 
-             + (1  | FoodItem)
+             + (1 + gng_cond_n | subjectID) 
+             + (1 + gng_cond_n | FoodItem)
              , data = d
              , family = gaussian()
              , prior = prior_list_brm0
@@ -419,8 +419,8 @@ In this case I will also try the defaults, but normally you would use different 
 
 ```{r bayes_factor_default}
 brm0_def <- brm(diff ~  1
-             + (1  | subjectID) 
-             + (1 | FoodItem)
+             + (1 + gng_cond_n | subjectID) 
+             + (1 + gng_cond_n | FoodItem)
              , warmup = 1000, iter = 10000, chains = 4, cores = 4
              , data = d
              , save_all_pars = T
